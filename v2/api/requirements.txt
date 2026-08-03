@@ -1,0 +1,7 @@
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+pydantic==2.*
+python-multipart==0.0.18
+pypdf==4.*
+python-docx==1.1.*
+openpyxl==3.1.*
