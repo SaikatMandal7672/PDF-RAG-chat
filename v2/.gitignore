@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data/*.db
+data/*.jsonl
+data/blobs/
+data/uploads/*
+!data/uploads/.gitkeep
+data/index.json
+data/extracted_tables.json

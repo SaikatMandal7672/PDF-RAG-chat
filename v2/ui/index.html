@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multimodal RAG — QA</title>
+<style>
+  :root{--bg:#09090b;--panel:#111113;--panel2:#18181b;--border:#27272a;--fg:#fafafa;--muted:#a1a1aa;--accent:#fafafa;--radius:10px}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;min-height:100vh}
+  .wrap{max-width:780px;margin:0 auto;padding:24px 16px 64px}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  h1{font-size:18px;font-weight:650;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:13px;margin-top:2px}
+  .status{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:4px 10px;background:var(--panel)}
+  .dot{width:8px;height:8px;border-radius:50%;background:#52525b}
+  .dot.ok{background:#4ade80}.dot.bad{background:#f87171}
+  .tabs{display:flex;gap:6px;margin-bottom:14px}
+  .tab{background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:8px;padding:7px 14px;font-size:13px;font-weight:600;cursor:pointer}
+  .tab.active{background:var(--panel2);color:var(--fg)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:14px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  textarea{width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--fg);padding:10px 12px;font-size:14px;resize:vertical;min-height:64px;outline:none}
+  textarea:focus{border-color:#52525b}
+  select,input[type=text]{background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:8px 10px;font-size:13px;outline:none}
+  button{cursor:pointer;border-radius:8px;font-size:13px;font-weight:600;padding:9px 16px;border:1px solid var(--border)}
+  .btn-primary{background:var(--accent);color:#09090b;border-color:var(--accent)}
+  .btn-primary:disabled{opacity:.5;cursor:wait}
+  .btn-ghost{background:transparent;color:var(--fg)}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+  .chip{font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:4px 10px;background:transparent;cursor:pointer}
+  .chip:hover{color:var(--fg);border-color:#52525b}
+  .badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .badge{font-size:11px;font-weight:600;border:1px solid var(--border);border-radius:6px;padding:2px 8px;color:var(--muted);background:var(--panel2)}
+  .badge.warn{color:#fbbf24;border-color:#713f12}
+  .badge.good{color:#4ade80;border-color:#14532d}
+  .answer{white-space:pre-wrap;font-size:14px;line-height:1.6}
+  .cite{border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-top:8px;background:var(--panel2);font-size:13px}
+  .cite .meta{color:var(--muted);font-size:11px;margin-bottom:4px}
+  .muted{color:var(--muted);font-size:13px}
+  .tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+  .tbl th,.tbl td{border:1px solid var(--border);padding:6px 8px;text-align:left}
+  .tbl th{color:var(--muted);font-weight:600;background:var(--panel2)}
+  .hidden{display:none}
+  footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div><h1>Multimodal RAG</h1><div class="sub">Text · Tables · Images · Code — no login</div></div>
+    <span class="status"><span class="dot" id="dot"></span><span id="status">checking…</span></span>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" data-t="ask">Ask</button>
+    <button class="tab" data-t="data">Data</button>
+    <button class="tab" data-t="audit">Audit</button>
+    <button class="tab" data-t="eval">Eval</button>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <input type="text" id="api" style="flex:1" placeholder="API URL (e.g. http://localhost:7860)">
+      <button class="btn-ghost" id="save-api">Save</button>
+    </div>
+    <div class="muted" style="margin-top:8px" id="docs-line">—</div>
+  </div>
+
+  <section id="t-ask">
+    <div class="card">
+      <textarea id="q" placeholder="Ask… e.g. What was Q3 revenue? / What does the chart show? / total revenue"></textarea>
+      <div class="row" style="margin-top:10px">
+        <select id="mod">
+          <option value="">All modalities</option>
+          <option value="text">Text</option><option value="table">Tables</option>
+          <option value="image">Images</option><option value="code">Code</option>
+        </select>
+        <select id="topk"><option value="3">top 3</option><option value="5" selected>top 5</option><option value="8">top 8</option></select>
+        <button class="btn-primary" id="ask">Ask</button>
+      </div>
+      <div class="chips">
+        <button class="chip" data-q="What was Q3 revenue?">Q3 revenue</button>
+        <button class="chip" data-q="total revenue across quarters">total revenue</button>
+        <button class="chip" data-q="What does the revenue chart show?">Revenue chart</button>
+        <button class="chip" data-q="What is the returns policy?">Returns policy</button>
+      </div>
+    </div>
+    <div class="card hidden" id="out">
+      <div class="badges" id="badges"></div>
+      <div class="answer" id="answer"></div>
+      <div id="cites"></div>
+    </div>
+  </section>
+
+  <section id="t-data" class="hidden">
+    <div class="card">
+      <div class="muted" style="margin-bottom:8px">Upload a file to index it (md, txt, csv, xlsx, pdf, docx, code, png/jpg). Rebuilds the local index.</div>
+      <div class="row"><input type="file" id="file"><button class="btn-primary" id="up">Upload + Index</button></div>
+      <div class="muted" id="up-msg" style="margin-top:8px"></div>
+    </div>
+    <div class="card"><div class="muted" id="docs-list">—</div></div>
+  </section>
+
+  <section id="t-audit" class="hidden">
+    <div class="card">
+      <div class="row"><button class="btn-ghost" id="load-audit">Refresh audit</button></div>
+      <div id="audit-list" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+  <section id="t-eval" class="hidden">
+    <div class="card">
+      <div class="row">
+        <button class="btn-primary" id="run-eval">Run golden eval</button>
+        <button class="btn-ghost" id="run-red">Run red-team</button>
+      </div>
+      <div id="eval-out" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <footer>Final build · local-first, free-tier deployable · <span id="foot-api"></span></footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const apiInput = $('api'), dot = $('dot'), statusEl = $('status');
+apiInput.value = localStorage.getItem('mmrag_api') || 'http://localhost:7860';
+const base = () => (localStorage.getItem('mmrag_api') || apiInput.value).replace(/\/$/, '');
+const setFoot = () => $('foot-api').textContent = base();
+setFoot();
+$('save-api').onclick = () => { localStorage.setItem('mmrag_api', apiInput.value.trim()); setFoot(); check(); };
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  ['ask','data','audit','eval'].forEach(k => $('t-'+k).classList.toggle('hidden', k !== t.dataset.t));
+});
+document.querySelectorAll('.chip').forEach(c => c.onclick = () => { $('q').value = c.dataset.q; ask(); });
+
+async function check(){
+  try{
+    const r = await fetch(base() + '/health'); const j = await r.json();
+    dot.className = 'dot ok'; statusEl.textContent = `online · ${j.chunks} chunks`;
+    const d = await (await fetch(base() + '/api/docs')).json();
+    const line = d.docs.map(x => `${x.doc_id} (${x.chunks}, ${x.modalities.join('/')})`).join('  ·  ') || 'empty index';
+    $('docs-line').textContent = line; $('docs-list').textContent = line;
+  }catch(e){ dot.className = 'dot bad'; statusEl.textContent = 'offline — start API: uvicorn api.main:app --port 7860'; }
+}
+
+async function ask(){
+  const q = $('q').value.trim(); if(!q) return;
+  const btn = $('ask'); btn.disabled = true; btn.textContent = 'Asking…';
+  $('out').classList.remove('hidden');
+  $('answer').textContent = '…'; $('cites').innerHTML = ''; $('badges').innerHTML = '';
+  try{
+    const r = await fetch(base() + '/api/query', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({query:q, top_k:+$('topk').value, modality:$('mod').value || null, session_id:'ui'})});
+    const j = await r.json();
+    $('badges').innerHTML =
+      `<span class="badge">route: ${j.route}</span><span class="badge">conf: ${j.confidence}</span>` +
+      `<span class="badge">${j.latency_ms} ms</span>` +
+      (j.needs_review ? `<span class="badge warn">needs review</span>` : `<span class="badge good">cited</span>`);
+    $('answer').textContent = j.answer_markdown;
+    $('cites').innerHTML = (j.citations||[]).map(c =>
+      `<div class="cite"><div class="meta">${c.modality} · ${c.chunk_id} · ${c.doc_id}${c.page ? ' · p.'+c.page : ''}</div>${c.snippet}</div>`
+    ).join('') || '<div class="muted">No citations.</div>';
+  }catch(e){ $('answer').textContent = 'API unreachable. Check the API URL above.'; }
+  btn.disabled = false; btn.textContent = 'Ask';
+}
+$('ask').onclick = ask;
+$('q').addEventListener('keydown', e => { if(e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask(); });
+
+$('up').onclick = async () => {
+  const f = $('file').files[0]; if(!f){ $('up-msg').textContent = 'Choose a file first.'; return; }
+  $('up-msg').textContent = 'Uploading…';
+  const fd = new FormData(); fd.append('file', f);
+  try{
+    const r = await fetch(base() + '/api/ingest', {method:'POST', body:fd});
+    const j = await r.json();
+    $('up-msg').textContent = `Indexed ${j.filename}: ${j.chunks} chunks total.`;
+    check();
+  }catch(e){ $('up-msg').textContent = 'Upload failed — is the API running?'; }
+};
+
+$('load-audit').onclick = async () => {
+  try{
+    const s = await (await fetch(base() + '/api/eval/summary')).json();
+    const a = await (await fetch(base() + '/api/audit?limit=10')).json();
+    $('audit-list').innerHTML =
+      `<div class="muted">queries: ${s.queries_logged} · reviews: ${s.reviews} · avg: ${s.avg_latency_ms ?? '—'} ms · blocks: ${s.block_rate ?? 0}</div>` +
+      `<table class="tbl"><tr><th>query</th><th>route</th><th>conf</th><th>ms</th></tr>` +
+      a.queries.map(q => `<tr><td>${q.query.slice(0,60)}</td><td>${q.route}</td><td>${q.confidence}</td><td>${q.latency_ms}</td></tr>`).join('') + `</table>`;
+  }catch(e){ $('audit-list').textContent = 'Audit unreachable.'; }
+};
+
+$('run-eval').onclick = async () => {
+  $('eval-out').innerHTML = '<div class="muted">Running golden set…</div>';
+  try{
+    const j = await (await fetch(base() + '/api/eval/run', {method:'POST'})).json();
+    $('eval-out').innerHTML = `<div class="badges"><span class="badge">pass: ${j.pass}/${j.cases} (${j.pass_rate})</span><span class="badge">p50: ${j.p50_latency_ms} ms</span><span class="badge">cite cov: ${j.citation_coverage}</span></div>` +
+      `<table class="tbl"><tr><th>query</th><th>ok</th><th>route</th></tr>` +
+      j.results.map(r => `<tr><td>${r.query.slice(0,50)}</td><td>${r.passed ? '✓' : '✗'}</td><td>${r.route}</td></tr>`).join('') + `</table>`;
+  }catch(e){ $('eval-out').textContent = 'Eval failed.'; }
+};
+
+$('run-red').onclick = async () => {
+  $('eval-out').innerHTML = '<div class="muted">Running red-team…</div>';
+  try{
+    const j = await (await fetch(base() + '/api/redteam/run', {method:'POST'})).json();
+    $('eval-out').innerHTML = `<div class="badges"><span class="badge">red-team: ${j.pass}/${j.cases} (${j.pass_rate})</span></div>` +
+      Object.values(j.suites).map(s => `<div class="muted">${s.suite}: ${s.pass}/${s.cases}</div>`).join('');
+  }catch(e){ $('eval-out').textContent = 'Red-team failed.'; }
+};
+
+check();
+</script>
+</body>
+</html>
