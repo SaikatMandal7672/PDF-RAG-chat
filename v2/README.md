@@ -30,7 +30,7 @@ Edit `.env` and fill in what you have (leave the rest blank — the app
 degrades gracefully):
 
 ```
-NVIDIA_NIM_API_KEY=nvapi-...          # chat + embeddings + vision (required for AI answers)
+NVIDIA_NIM_API_KEY=<paste-your-key-here>  # chat + embeddings + vision (required for AI answers)
 NIM_CHAT_MODEL=openai/gpt-oss-20b     # verified fast+clean on NIM
 NIM_EMBED_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2   # text+image joint space
 NIM_VISION_MODEL=meta/llama-3.2-11b-vision-instruct    # figure captions at ingest
