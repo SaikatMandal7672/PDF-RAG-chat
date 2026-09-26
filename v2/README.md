@@ -127,14 +127,7 @@ fallback mode is a fixed 4/4), red-team 6/6, injection blocked, 404s correct.
 | `GET /api/strategy` | audit-based tuning suggestions (advisory, never auto-applies) |
 | `GET /health`, `GET /api/docs` | liveness + indexed-doc listing |
 
-## 9. Deploy ($0)
-
-- Backend → Hugging Face Spaces (Docker, port 7860). Commit `data/index.json`;
-  set `NVIDIA_NIM_API_KEY` / `QDRANT_*` in Space Settings → Variables (never in git).
-- UI → Vercel static: deploy the `ui/` folder, paste the Space URL in the API box.
-- Details: `deploy-free.md`.
-
-## 10. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause → fix |
 |---------|-------------|
@@ -146,7 +139,7 @@ fallback mode is a fixed 4/4), red-team 6/6, injection blocked, 404s correct.
 | Scanned PDF → stub chunk | No text layer and no OCR bundled — add text PDFs or OCR upstream |
 | Stale results after deleting a file | Re-run indexer (it prunes Qdrant orphans automatically) |
 
-## 11. Layout
+## 10. Layout
 
 - `api/` — `main.py` (routes + `.env` load), `llm.py` (NIM: generate/judge/embed/classify/caption),
   `reasoning.py` (planner/router), `retrieval.py` (hybrid + RRF + rerank + compress),

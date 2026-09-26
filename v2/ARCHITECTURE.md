@@ -102,7 +102,7 @@ Strategist = human reading /api/eval/summary (only unautomated box)
 | `ingest/index_local.py` | PDF-first indexer + figure pull + vision captions + vector push + Qdrant prune | lines change as built |
 | `ui/index.html` | single-file Ask/Data/Audit/Eval app | no build step |
 | `eval_data/golden_qa.jsonl` | 4 cases: revenue table, chart, returns, injection | eval contract |
-| `data/index.json` | built index (git-committable for $0 deploy) | 6 chunks |
+| `data/index.json` | built index (portable snapshot — clone + run, no rebuild) | 6 chunks |
 | `.env` | NVIDIA_NIM_*, NIM_*_MODEL, QDRANT_* (gitignored, never committed) | user fills |
 
 ## 5. Numbers to quote
