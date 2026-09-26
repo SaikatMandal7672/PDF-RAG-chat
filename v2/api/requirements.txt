@@ -3,5 +3,7 @@ uvicorn[standard]==0.30.*
 pydantic==2.*
 python-multipart==0.0.18
 pypdf==4.*
-python-docx==1.1.*
-openpyxl==3.1.*
+python-dotenv==1.*
+openai==1.*
+qdrant-client==1.*
+pymupdf==1.*

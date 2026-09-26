@@ -1,7 +1,14 @@
-"""Specialist agents: text / table(+SQL-lite) / vision / code / multi."""
+"""Specialist agents: text / table(+SQL-lite) / vision / code / multi.
+
+Each agent tries NIM generation first (llm.generate) and falls back to the
+extractive answer when no key is set or the call fails. Confidence stays
+retrieval-based either way, so routing never shifts under the LLM.
+"""
 from __future__ import annotations
 
 import re
+
+from .llm import generate
 
 
 def _snippet(c: dict, limit: int = 320) -> str:
@@ -9,12 +16,19 @@ def _snippet(c: dict, limit: int = 320) -> str:
     return t[:limit] + ("…" if len(t) > limit else "")
 
 
-def text_agent(query: str, hits: list[dict]) -> tuple[str, float]:
+def _text_extract(query: str, hits: list[dict]) -> tuple[str, float]:
     if not hits:
         return ("I couldn't find anything relevant in the indexed docs.", 0.0)
     lines = [f"- {_snippet(h)}" for h in hits[:3]]
     return ("Based on the indexed chunks:\n\n" + "\n".join(lines),
             min(0.9, 0.25 + 0.2 * len(hits)))
+
+
+def text_agent(query: str, hits: list[dict]) -> tuple[str, float]:
+    gen = generate(query, hits, "text")
+    if gen:
+        return (gen, min(0.9, 0.25 + 0.2 * len(hits)) if hits else 0.5)
+    return _text_extract(query, hits)
 
 
 def _parse_markdown_table(md: str) -> tuple[list[str], list[list[float | str]]]:
@@ -69,7 +83,7 @@ def _sql_lite(query: str, md: str) -> str | None:
     return f"count({col}) = {len(vals)} rows"
 
 
-def table_agent(query: str, hits: list[dict]) -> tuple[str, float]:
+def _table_extract(query: str, hits: list[dict]) -> tuple[str, float]:
     tables = [h for h in hits if h.get("modality") == "table"] or hits
     if not tables:
         return ("No tables matched your query.", 0.0)
@@ -84,7 +98,15 @@ def table_agent(query: str, hits: list[dict]) -> tuple[str, float]:
     return (f"{head}\n\nSummary: {t.get('summary', '')}", 0.7)
 
 
-def vision_agent(query: str, hits: list[dict]) -> tuple[str, float]:
+def table_agent(query: str, hits: list[dict]) -> tuple[str, float]:
+    rel = [h for h in hits if h.get("modality") == "table"] or hits
+    gen = generate(query, rel, "table")
+    if gen:
+        return (gen, 0.8 if rel else 0.0)
+    return _table_extract(query, hits)
+
+
+def _vision_extract(query: str, hits: list[dict]) -> tuple[str, float]:
     imgs = [h for h in hits if h.get("modality") == "image"] or hits
     if not imgs:
         return ("No images matched your query.", 0.0)
@@ -94,7 +116,15 @@ def vision_agent(query: str, hits: list[dict]) -> tuple[str, float]:
              f"{im.get('ref', '')}\n\nCaption: {_snippet(im, 500)}"), 0.65)
 
 
-def code_agent(query: str, hits: list[dict]) -> tuple[str, float]:
+def vision_agent(query: str, hits: list[dict]) -> tuple[str, float]:
+    rel = [h for h in hits if h.get("modality") == "image"] or hits
+    gen = generate(query, rel, "image")
+    if gen:
+        return (gen, 0.65 if rel else 0.0)
+    return _vision_extract(query, hits)
+
+
+def _code_extract(query: str, hits: list[dict]) -> tuple[str, float]:
     code = [h for h in hits if h.get("modality") == "code"] or hits
     if not code:
         return ("No code matched your query.", 0.0)
@@ -103,14 +133,26 @@ def code_agent(query: str, hits: list[dict]) -> tuple[str, float]:
     return (f"Relevant code `{c['chunk_id']}` ({path}):\n\n```\n{_snippet(c, 900)}\n```", 0.7)
 
 
+def code_agent(query: str, hits: list[dict]) -> tuple[str, float]:
+    rel = [h for h in hits if h.get("modality") == "code"] or hits
+    gen = generate(query, rel, "code")
+    if gen:
+        return (gen, 0.7 if rel else 0.0)
+    return _code_extract(query, hits)
+
+
 def multi_agent(query: str, hits: list[dict]) -> tuple[str, float]:
     parts: list[str] = []
     confs: list[float] = []
-    for agent in (text_agent, table_agent, vision_agent):
-        a, c = agent(query, hits)
+    for fn in (_text_extract, _table_extract, _vision_extract):
+        a, c = fn(query, hits)
         if c > 0:
             parts.append(a)
             confs.append(c)
+    avg = round(sum(confs) / len(confs), 2) if confs else 0.0
+    gen = generate(query, hits, "multi")
+    if gen:
+        return (gen, avg or 0.5)
     if not parts:
         return ("I couldn't find anything relevant in the indexed docs.", 0.0)
-    return ("\n\n---\n\n".join(parts[:3]), round(sum(confs) / len(confs), 2))
+    return ("\n\n---\n\n".join(parts[:3]), avg)

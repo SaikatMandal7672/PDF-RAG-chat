@@ -70,6 +70,21 @@ def _dense_terms(query: set[str], chunk: dict) -> float:
     return 2.0 * len(query & hay_q) + 1.5 * len(query & hay_kw)
 
 
+def _dense_search(query: str, top_k: int = 10,
+                 modality: str | None = None) -> list[dict]:
+    """NIM query-vector -> Qdrant top-k. [] when unconfigured or failing."""
+    try:
+        from . import llm, vectordb
+    except Exception:
+        return []
+    if not llm.llm_configured() or not vectordb.configured():
+        return []
+    vecs = llm.embed([query], kind="query")
+    if not vecs:
+        return []
+    return vectordb.search(vecs[0], top_k=top_k, modality=modality)
+
+
 def _rrf(ranks: list[list[str]], k: int = 60) -> dict[str, float]:
     fused: dict[str, float] = {}
     for ranking in ranks:
@@ -127,7 +142,13 @@ def hybrid_search(query: str, top_k: int = 5, modality: str | None = None) -> li
 
     bm25_rank = sorted(chunks, key=lambda c: _bm25_terms(tokenize(query), c, idfs), reverse=True)
     dense_rank = sorted(chunks, key=lambda c: _dense_terms(tokenize(query), c), reverse=True)
-    fused = _rrf([[c["chunk_id"] for c in bm25_rank], [c["chunk_id"] for c in dense_rank]])
+    rankings = [[c["chunk_id"] for c in bm25_rank], [c["chunk_id"] for c in dense_rank]]
+    vec_hits = _dense_search(query, top_k=max(top_k * 2, 10), modality=modality)
+    if vec_hits:
+        rankings.append([c["chunk_id"] for c in vec_hits])
+        for c in vec_hits:
+            by_id.setdefault(c["chunk_id"], c)
+    fused = _rrf(rankings)
     scored = []
     for cid, f in fused.items():
         c = dict(by_id[cid])

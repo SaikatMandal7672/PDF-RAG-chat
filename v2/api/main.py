@@ -9,6 +9,12 @@ import time
 import uuid
 from pathlib import Path
 
+try:  # optional: load .env so NIM/LLM keys work without manual export
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -130,6 +136,12 @@ def review(qa_id: str, req: ReviewRequest) -> dict:
 @app.get("/api/eval/summary")
 def eval_summary() -> dict:
     return stats()
+
+
+@app.get("/api/strategy")
+def strategy(limit: int = 100) -> dict:
+    from .strategist import analyze
+    return analyze(max(1, min(limit, 500)))
 
 
 @app.post("/api/eval/run")

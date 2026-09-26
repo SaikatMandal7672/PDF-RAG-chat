@@ -62,16 +62,26 @@ def _llm_intent(query: str) -> str | None:
 
 def plan(query: str, modality_filter: str | None = None) -> dict:
     intent = _rule_intent(query, modality_filter)
+    planner = "rules"
     if modality_filter is None:
-        llm = _llm_intent(query)
-        if llm:
-            intent = llm
+        legacy = _llm_intent(query)  # Gemini path, kept for backwards compat
+        if legacy:
+            intent, planner = legacy, "gemini"
+        else:
+            try:
+                from .llm import classify
+            except Exception:
+                classify = None  # type: ignore
+            if classify is not None:
+                nim = classify(query)
+                if nim:
+                    intent, planner = nim, "nim"
     return {
         "intent": intent,
         "needs_table": intent in ("table", "multi"),
         "needs_vision": intent in ("image", "multi"),
         "rewritten_queries": [query.strip()],
-        "planner": "gemini" if os.environ.get("GEMINI_API_KEY") and modality_filter is None and intent != _rule_intent(query, None) else "rules",
+        "planner": planner,
     }
 
 

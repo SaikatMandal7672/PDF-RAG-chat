@@ -1,8 +1,14 @@
-"""Full local indexer: md/txt/csv/xlsx/pdf/docx/code/images -> data/index.json.
+"""PDF-first indexer: pdf (+ md/txt notes, image captions) -> data/index.json.
 
-Dependency-light by design: every heavy parser is optional.
-If a library is missing, the file is still indexed via a safe fallback
-so `python3 ingest/index_local.py` never crashes (free-tier friendly).
+Target: multimodal RAG around PDFs that contain text, tables and images.
+- PDF: text extracted per page; table rows kept whole; chart/image pages
+  kept as caption blocks (add a .caption.txt sidecar for real captions).
+- MD/TXT: tiny reader for local notes and demo files (same chunker).
+- PNG/JPG: standalone charts via sidecar `<name>.caption.txt`.
+- Anything else: stored as a short reference stub so uploads never vanish.
+
+Optional deps (pypdf, pymupdf) degrade gracefully: if neither is installed,
+the PDF is still indexed by filename instead of crashing.
 
 Usage:
   python3 ingest/index_local.py
@@ -10,18 +16,22 @@ Usage:
 """
 from __future__ import annotations
 
-import csv
-import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+try:  # optional: load .env so NIM/Qdrant work when run directly
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
 SAMPLES = ROOT / "data" / "samples"
 UPLOADS = ROOT / "data" / "uploads"
 OUT = ROOT / "data" / "index.json"
-TABLES_OUT = ROOT / "data" / "extracted_tables.json"
+TABLES_OUT = ROOT / "data" / "extracted_tables.json"  # kept for compat, always []
 
 STOP = {
     "the", "and", "for", "with", "this", "that", "from", "have", "will",
@@ -29,9 +39,6 @@ STOP = {
     "also", "were", "what", "when", "which", "their", "there", "been",
 }
 
-CODE_EXT = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".md"}
-TABLE_EXT = {".csv", ".tsv"}
-SHEET_EXT = {".xlsx", ".xls"}
 IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
@@ -71,7 +78,7 @@ def _mk(doc_id: str, cid: str, modality: str, content: str,
 
 
 def chunk_text(doc_id: str, text: str) -> list[dict]:
-    """Structure-aware: headings split, markdown tables kept whole."""
+    """Split on headings, never split a markdown table mid-row."""
     lines = text.splitlines()
     blocks: list[str] = []
     buf: list[str] = []
@@ -108,115 +115,123 @@ def read_markdown(path: Path) -> list[dict]:
     return chunk_text(path.stem, path.read_text(encoding="utf-8", errors="replace"))
 
 
-def read_csv_file(path: Path) -> tuple[list[dict], dict | None]:
-    try:
-        with path.open(newline="", encoding="utf-8-sig") as f:
-            rows = list(csv.reader(f))
-    except OSError:
-        return ([], None)
-    if not rows:
-        return ([], None)
-    header, body = rows[0], rows[1:6]
-    md = "| " + " | ".join(header) + " |\n| " + " | ".join(["---"] * len(header)) + " |\n"
-    for r in body:
-        md += "| " + " | ".join(r) + " |\n"
-    md += f"\n({len(body)} of {max(0, len(rows) - 1)} rows shown)"
-    doc_id = path.stem
-    chunk = _mk(doc_id, f"{doc_id}-table0", "table", md, f"{path.name} sheet",
-                summary=f"Table from {path.name}: {', '.join(header[:5])}")
-    table = {"table_id": f"{doc_id}-t0", "doc_id": doc_id, "columns": header,
-             "rows": [dict(zip(header, r)) for r in rows[1:50]]}
-    return ([chunk], table)
-
-
-def read_xlsx(path: Path) -> tuple[list[dict], dict | None]:
-    try:
-        import openpyxl  # type: ignore
-    except ImportError:
-        return ([_mk(path.stem, f"{path.stem}-c0", "text",
-                      f"Spreadsheet {path.name} uploaded (install openpyxl for cell-level parse).",
-                      path.name)], None)
-    try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(values_only=True, max_row=51))
-    except Exception:
-        return ([], None)
-    rows = [[("" if v is None else str(v)) for v in r] for r in rows if any(v is not None for v in r)]
-    if not rows:
-        return ([], None)
-    header, body = rows[0], rows[1:]
-    md = "| " + " | ".join(header) + " |\n| " + " | ".join(["---"] * len(header)) + " |\n"
-    for r in body[:8]:
-        md += "| " + " | ".join(r) + " |\n"
-    doc_id = path.stem
-    chunk = _mk(doc_id, f"{doc_id}-table0", "table", md, f"{path.name}",
-                summary=f"Sheet {ws.title}: {', '.join(header[:5])}")
-    table = {"table_id": f"{doc_id}-t0", "doc_id": doc_id, "columns": header,
-             "rows": [dict(zip(header, r)) for r in body[:50]]}
-    return ([chunk], table)
-
-
 def read_pdf(path: Path) -> list[dict]:
-    text = ""
+    """Text per page + embedded figures as image chunks.
+
+    Text: pypdf -> pymupdf -> filename stub (never crashes).
+    Figures: pymupdf image pull (skips icons <80px), saved to data/blobs/,
+    one `image` chunk each with page number + surrounding page text so
+    keyword search still finds them without any ML model.
+    """
+    pages: list[tuple[int, str]] = []
     try:
         from pypdf import PdfReader  # type: ignore
         reader = PdfReader(str(path))
         for i, pg in enumerate(reader.pages[:30]):
             t = pg.extract_text() or ""
             if t.strip():
-                text += f"\n## Page {i + 1}\n{t}\n"
+                pages.append((i + 1, t))
     except ImportError:
         pass
     except Exception:
         pass
-    if not text.strip():
+    if not pages:
         try:
             import fitz  # pymupdf, optional  # type: ignore
             doc = fitz.open(str(path))
             for i, pg in enumerate(doc[:30]):
-                text += f"\n## Page {i + 1}\n{pg.get_text()}\n"
+                t = pg.get_text()
+                if t.strip():
+                    pages.append((i + 1, t))
         except ImportError:
             pass
         except Exception:
             pass
-    if not text.strip():
+    chunks: list[dict] = []
+    if pages:
+        text = "".join(f"\n## Page {n}\n{t}\n" for n, t in pages)
+        chunks.extend(chunk_text(path.stem, text))
+    else:
         # last-resort fallback: index the filename so uploads never silently vanish
-        text = f"## {path.name}\nPDF uploaded ({path.stat().st_size} bytes). Install pypdf for text extraction."
-    return chunk_text(path.stem, text)
-
-
-def read_docx(path: Path) -> list[dict]:
-    try:
-        import docx  # python-docx, optional  # type: ignore
-        d = docx.Document(str(path))
-        text = "\n".join(p.text for p in d.paragraphs if p.text.strip())
-        if text.strip():
-            return chunk_text(path.stem, text)
-    except ImportError:
-        pass
-    except Exception:
-        pass
-    return chunk_text(path.stem, f"## {path.name}\nWord doc uploaded. Install python-docx for text extraction.")
-
-
-def read_code(path: Path) -> list[dict]:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    # split large files on top-level defs/classes to keep symbols intact
-    parts = re.split(r"(?m)^(?=(def |class |function |const |export ))", text)
-    joined = [p for p in (parts or [text]) if p.strip()]
-    chunks = []
-    for i, part in enumerate(joined[:12]):
-        first = next((l for l in part.splitlines() if l.strip()), path.name)[:60]
-        chunks.append(_mk(path.stem, f"{path.stem}-code{i}", "code",
-                           part[:4000], f"{path.name} :: {first}"))
+        chunks.extend(chunk_text(
+            path.stem,
+            f"## {path.name}\nPDF uploaded ({path.stat().st_size} bytes, no extractable text layer)."))
+    chunks.extend(read_pdf_images(path, dict(pages)))
     return chunks
 
 
+def _llm():
+    """Import api.llm when run from anywhere. None when unavailable."""
+    try:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from api import llm  # type: ignore
+        return llm
+    except Exception:
+        return None
+
+
+def read_pdf_images(path: Path, page_texts: dict[int, str]) -> list[dict]:
+    """Pull embedded figures via pymupdf. [] without pymupdf or without figures."""
+    try:
+        import fitz  # type: ignore
+    except ImportError:
+        return []
+    try:
+        doc = fitz.open(str(path))
+    except Exception:
+        return []
+    blobs = ROOT / "data" / "blobs"
+    try:
+        blobs.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return []
+    chunks: list[dict] = []
+    for i, pg in enumerate(doc[:30]):
+        try:
+            imgs = pg.get_images(full=True)
+        except Exception:
+            continue
+        for j, im in enumerate(imgs):
+            try:
+                pix = fitz.Pixmap(doc, im[0])
+                if pix.n > 4:
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                if max(pix.width, pix.height) < 80:
+                    continue  # icon/logo, not a figure
+                fname = f"{path.stem}_p{i + 1}_img{j}.png"
+                pix.save(str(blobs / fname))
+            except Exception:
+                continue
+            ctx = (page_texts.get(i + 1, "") or "")[:300]
+            body = f"Figure {j + 1} on page {i + 1} of {path.name}."
+            body += _caption_blob(blobs / fname, ctx)
+            body += f" Page text: {ctx}" if ctx.strip() else " (No caption yet.)"
+            chunks.append(_mk(path.stem, f"{path.stem}-p{i + 1}-img{j}", "image",
+                              body, f"Page {i + 1} figure {j + 1}",
+                              page=i + 1, ref=f"blobs/{fname}", summary=body[:140]))
+    return chunks
+
+
+def _caption_blob(blob: Path, page_text: str) -> str:
+    """Vision-caption one saved figure. '' when unconfigured/failing (fail-soft)."""
+    llm = _llm()
+    if llm is None or not llm.llm_configured():
+        return ""
+    try:
+        import base64
+        raw = blob.read_bytes()
+        if len(raw) > 1_500_000:
+            return ""
+        cap = llm.caption_image("data:image/png;base64," + base64.b64encode(raw).decode(),
+                                page_text)
+        return f" Caption: {cap}" if cap else ""
+    except Exception:
+        return ""
+
+
 def read_image(path: Path) -> list[dict]:
+    """Standalone chart/photo: real caption comes from `<stem>.caption.txt`."""
     sidecar = path.with_suffix(".caption.txt")
     if sidecar.exists():
         caption = sidecar.read_text(encoding="utf-8", errors="replace").strip()
@@ -227,27 +242,17 @@ def read_image(path: Path) -> list[dict]:
                  summary=caption[:140])]
 
 
-def index_file(path: Path) -> tuple[list[dict], list[dict]]:
+def index_file(path: Path) -> list[dict]:
     suf = path.suffix.lower()
     if suf in (".md", ".txt"):
-        return (read_markdown(path), [])
-    if suf in TABLE_EXT:
-        c, t = read_csv_file(path)
-        return (c, [t] if t else [])
-    if suf in SHEET_EXT:
-        c, t = read_xlsx(path)
-        return (c, [t] if t else [])
+        return read_markdown(path)
     if suf == ".pdf":
-        return (read_pdf(path), [])
-    if suf == ".docx":
-        return (read_docx(path), [])
+        return read_pdf(path)
     if suf in IMG_EXT:
-        return (read_image(path), [])
-    if suf in CODE_EXT or suf in {".json", ".yml", ".yaml", ".toml", ".sh"}:
-        return (read_code(path), [])
-    return ([_mk(path.stem, f"{path.stem}-c0", "text",
-                  f"File {path.name} uploaded (no parser for {suf}; stored as reference).",
-                  path.name)], [])
+        return read_image(path)
+    return [_mk(path.stem, f"{path.stem}-c0", "text",
+                 f"File {path.name} uploaded (only pdf/md/txt/png/jpg are parsed; stored as reference).",
+                 path.name)]
 
 
 def seed_demo() -> list[dict]:
@@ -283,7 +288,6 @@ def main() -> None:
     if UPLOADS.exists():
         srcs.append(UPLOADS)
     chunks: list[dict] = seed_demo()
-    tables: list[dict] = []
     seen: set[str] = set()
     for src in srcs:
         if not src.exists():
@@ -295,15 +299,70 @@ def main() -> None:
                 continue
             seen.add(p.name)
             try:
-                c, t = index_file(p)
+                chunks.extend(index_file(p))
             except Exception as e:  # never fail the whole build on one file
-                c = [_mk(p.stem, f"{p.stem}-err", "text", f"Could not parse {p.name}: {e}", p.name)]
-                t = []
-            chunks.extend(c)
-            tables.extend(t)
+                chunks.append(_mk(p.stem, f"{p.stem}-err", "text",
+                                  f"Could not parse {p.name}: {e}", p.name))
     OUT.write_text(json.dumps(chunks, indent=2))
-    TABLES_OUT.write_text(json.dumps(tables, indent=2))
-    print(f"wrote {len(chunks)} chunks -> {OUT} (+{len(tables)} tables)")
+    TABLES_OUT.write_text("[]")
+    print(f"wrote {len(chunks)} chunks -> {OUT}")
+    n_vec = push_vectors(chunks)
+    if n_vec:
+        print(f"pushed {n_vec} vectors -> Qdrant")
+
+
+def push_vectors(chunks: list[dict]) -> int:
+    """Embed chunks with NIM + upsert to Qdrant. 0 when unconfigured/failing.
+
+    Text chunks embed as text; image chunks with a local blob ref embed as
+    base64 data-URLs (same joint space). index.json is always the fallback.
+    """
+    try:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from api import llm, vectordb  # type: ignore
+    except Exception:
+        return 0
+    if not chunks or not llm.llm_configured() or not vectordb.configured():
+        return 0
+    if not vectordb.ensure_collection():
+        return 0
+    try:
+        import base64  # noqa: F401 (imported here to keep top light)
+    except ImportError:
+        return 0
+    payloads: list[str] = []
+    owners: list[int] = []
+    for idx, c in enumerate(chunks):
+        ref = c.get("ref") or ""
+        if c.get("modality") == "image" and ref.startswith("blobs/"):
+            blob = ROOT / "data" / ref
+            try:
+                raw = blob.read_bytes()
+                if len(raw) > 1_500_000:  # skip giant figures for hosted embed
+                    continue
+                payloads.append("data:image/png;base64," + base64.b64encode(raw).decode())
+                owners.append(idx)
+                continue
+            except OSError:
+                pass
+        text = f"{' '.join(c.get('heading_path', []))}\n{c.get('content_text', '')}"[:1500]
+        if text.strip():
+            payloads.append(text)
+            owners.append(idx)
+    vectors: list[list[float]] = []
+    keep: list[int] = []
+    for start in range(0, len(payloads), 32):
+        batch = payloads[start:start + 32]
+        vecs = llm.embed(batch, kind="passage")
+        if not vecs:
+            return 0
+        for idx, v in zip(owners[start:start + 32], vecs):
+            keep.append(idx)
+            vectors.append(v)
+    n = vectordb.upsert([chunks[i] for i in keep], vectors)
+    vectordb.prune([chunks[i]["chunk_id"] for i in keep])  # drop stale test/doc points
+    return n
 
 
 if __name__ == "__main__":
